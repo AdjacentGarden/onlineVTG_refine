@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/eval.sh configs/tacos.yaml /data2/zhenghang2/code/code/validify/OnVTG_refine_0406/results/tacos/models/last.pth

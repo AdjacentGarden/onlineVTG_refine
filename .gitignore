@@ -1,0 +1,56 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+conda_env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Dataset
+data/
+dataset/
+datasets/
+
+# Training outputs
+runs/
+outputs/
+results/
+work_dirs/
+
+# Model weights
+checkpoints/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.rknn
+*.engine
+*.bin
+*.safetensors
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+tmp/
+temp/
+*.zip
+*.tar
+*.tar.gz

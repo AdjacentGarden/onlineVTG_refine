@@ -1,0 +1,1 @@
+hierarchy原始代码修复memorybug、去除future prediction分支、原始evaluate代码、batchsize=8、双卡训练
