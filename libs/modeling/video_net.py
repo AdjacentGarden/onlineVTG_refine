@@ -1005,15 +1005,13 @@ class OnlineVideoTransformer(nn.Module):
             for scale in range(len(self.branch)):
                 same_history, same_history_mask = self.memory.read(scale)
 
-                # 1. 当前层 online transformer。
-                # 这里保留原始逻辑：branch 内部仍然可以使用当前层历史 memory。
-                # ! not reasonable
-                # current, current_mask = self.branch[scale](
-                #     current,
-                #     current_mask,
-                #     same_history,
-                #     same_history_mask,
-                # )
+                # ! new part
+                current, current_mask = self.branch[scale](
+                    current,
+                    current_mask,
+                    None,
+                    None
+                )
 
                 # 2. 读取上一层，也就是更粗尺度历史 memory。
                 # 注意：
