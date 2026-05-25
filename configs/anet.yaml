@@ -72,8 +72,6 @@ train:
   loss_weight: 2.0
   past_reg_loss_weight: 1.0
   future_reg_loss_weight: 1.0
-  reg_phase_loss_weight: 1.0
-  length_loss_weight: 1.0
   reg_loss: diou
 
   optimizer:

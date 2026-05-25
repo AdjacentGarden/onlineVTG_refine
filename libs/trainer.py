@@ -10,7 +10,6 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.tensorboard import SummaryWriter
 
@@ -101,8 +100,6 @@ class Trainer:
         self.loss_weight = opt['train'].get('loss_weight', 1.0)
         self.past_reg_loss_weight = opt['train'].get('past_reg_loss_weight', 1.0)
         self.future_reg_loss_weight = opt['train'].get('future_reg_loss_weight', 1.0)
-        self.reg_phase_loss_weight = opt['train'].get('reg_phase_loss_weight', 1.0)
-        self.length_loss_weight = opt['train'].get('length_loss_weight', 1.0)
         self.reg_loss = opt['train'].get('reg_loss', 'diou')
 
         self.eval = opt['train']['eval']
@@ -158,7 +155,7 @@ class Trainer:
     
     def forward_backward(self, data_list):
         cls_loss = past_reg_loss = future_reg_loss = reg_loss = 0
-        reg_phase_loss = length_loss = total_loss = norm = 0
+        total_loss = norm = 0
         for i in range(0, self.batch_size, self.microbatch_size):
             loss_dict = self._microbatch_forward_backward(
                 data_list[i:i + self.microbatch_size],
@@ -168,8 +165,6 @@ class Trainer:
             past_reg_loss += loss_dict['past_reg']
             future_reg_loss += loss_dict['future_reg']
             reg_loss += loss_dict['reg']
-            reg_phase_loss += loss_dict['reg_phase']
-            length_loss += loss_dict['length']
             total_loss += loss_dict['total']
             norm += loss_dict['norm']
 
@@ -185,8 +180,6 @@ class Trainer:
             'past_reg': past_reg_loss,
             'future_reg': future_reg_loss,
             'reg': reg_loss,
-            'reg_phase': reg_phase_loss,
-            'length': length_loss,
             'total': total_loss,
         }
 
@@ -270,28 +263,9 @@ class Trainer:
             + self.future_reg_loss_weight * future_reg_loss
         )
 
-        pred_len = (pred_past + pred_future).clamp(min=1e-6)
-        gt_len = (gt_past + gt_future).clamp(min=1e-6)
-
-        pred_phase = pred_past / pred_len
-        gt_phase = gt_past / gt_len
-        reg_phase_loss = F.smooth_l1_loss(
-            pred_phase, gt_phase, reduction='sum'
-        ) / self.loss_norm * get_world_size()
-
-        pred_len_ratio = pred_len / gt_len
-        gt_len_ratio = torch.ones_like(pred_len_ratio)
-        length_loss = F.smooth_l1_loss(
-            pred_len_ratio,
-            gt_len_ratio,
-            reduction='sum',
-        ) / self.loss_norm * get_world_size()
-
         total_loss = (
             cls_loss
             + self.loss_weight * reg_loss
-            + self.reg_phase_loss_weight * reg_phase_loss
-            + self.length_loss_weight * length_loss
         )
         total_loss.backward()
         return {
@@ -299,8 +273,6 @@ class Trainer:
             'past_reg': past_reg_loss.detach(),
             'future_reg': future_reg_loss.detach(),
             'reg': reg_loss.detach(),
-            'reg_phase': reg_phase_loss.detach(),
-            'length': length_loss.detach(),
             'total': total_loss.detach(),
             'norm': norm.detach(),
         }

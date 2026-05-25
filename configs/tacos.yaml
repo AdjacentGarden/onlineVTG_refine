@@ -57,8 +57,8 @@ model:
 train:
   data:
     split: train
-    anno_file: /data2/zhenghang/code/zhenghang2/data/tacos/annotations/tacos.json
-    vid_feat_dir: /data2/zhenghang/code/zhenghang2/data/tacos/c3d_features
+    anno_file: data/tacos/annotations/tacos.json
+    vid_feat_dir: data/tacos/c3d_features
     text_feat_dir: null
     use_tokenizer: true
 
@@ -81,8 +81,6 @@ train:
   loss_weight: 1.0
   past_reg_loss_weight: 3.0
   future_reg_loss_weight: 1.0
-  reg_phase_loss_weight: 0.1
-  length_loss_weight: 0.1
   reg_loss: diou
 
   optimizer:

@@ -343,7 +343,7 @@ class GloVeTokenizer:
 
     def __init__(self, name='6B'):
 
-        self.vocab = torchtext.vocab.GloVe(name=name, cache='/data2/zhenghang/code/zhenghang2/code/glove/')
+        self.vocab = torchtext.vocab.GloVe(name=name, cache='data/glove')
         self.tokenizer = get_tokenizer("basic_english")
 
     def __call__(self, text, max_len=None):
