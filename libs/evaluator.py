@@ -139,24 +139,36 @@ class Evaluator:
         vid = vid.cuda(non_blocking=True)
         mask = mask.cuda(non_blocking=True)
         
-        fpn, fpn_masks = self.model.encode_video(vid, mask)
-        fpn_n_points = [m.size(-1) for m in fpn_masks]
-        fpn_points = self.pt_gen(fpn_n_points)
-
         targets = data['target'].squeeze(1) / self.vid_stride
         targets = targets.cuda(non_blocking=True)
 
-        fpn_logits_list, fpn_offsets_list = tuple(), tuple()
+        fpn_logits_list, fpn_offsets_list, fpn_masks_list, fpn_points_list = tuple(), tuple(), tuple(), tuple()
         for text, text_mask in zip(text_list, text_mask_list):
+            fpn, fpn_masks = self.model.encode_video(
+                vid,
+                mask,
+                text=text,
+                text_masks=text_mask,
+                text_size=text.size(0),
+            )
+            fpn_n_points = [m.size(-1) for m in fpn_masks]
+            fpn_points = self.pt_gen(fpn_n_points)
+
             fpn_logits, fpn_offsets, _, _, _, _ = \
                 self.model.fuse_and_predict(fpn, fpn_masks, text, text_mask, text_size=text.size(0))
             fpn_logits_list += (tuple(f.squeeze(1) for f in fpn_logits), )
             fpn_offsets_list += (tuple(f.squeeze(1) for f in fpn_offsets), )
-        
-        fpn_masks = [m.squeeze(1).squeeze(1) for m in fpn_masks]
+            fpn_masks_list += ([m.squeeze(1).squeeze(1) for m in fpn_masks], )
+            fpn_points_list += (fpn_points, )
+
         # collect segments and their scores
         segs_list, scores_list = tuple(), tuple()
-        for idx, (fpn_logits, fpn_offsets) in enumerate(zip(fpn_logits_list, fpn_offsets_list)):
+        for idx, (fpn_logits, fpn_offsets, fpn_masks, fpn_points) in enumerate(zip(
+            fpn_logits_list,
+            fpn_offsets_list,
+            fpn_masks_list,
+            fpn_points_list,
+        )):
             segs, scores = self._collect_segments(
                 fpn_points, fpn_logits, fpn_offsets, fpn_masks
             )

@@ -456,6 +456,7 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         embd_dim,
         n_levels,
         n_heads=4,
+        query_dim=None,
         attn_pdrop=0.0,
         proj_pdrop=0.0,
         init_res_gate=-4.0,
@@ -466,8 +467,22 @@ class CausalHierarchicalMemoryFusion(nn.Module):
 
         self.embd_dim = embd_dim
         self.n_levels = n_levels
+        self.query_dim = embd_dim if query_dim is None else query_dim
         self.use_same_memory = use_same_memory
         self.use_upper_memory = use_upper_memory
+
+        self.query_attn = nn.ModuleList([
+            MaskedCrossMHA(
+                embd_dim=embd_dim,
+                q_dim=embd_dim,
+                kv_dim=self.query_dim,
+                out_dim=embd_dim,
+                n_heads=n_heads,
+                attn_pdrop=attn_pdrop,
+                proj_pdrop=proj_pdrop,
+            )
+            for _ in range(n_levels)
+        ])
 
         self.same_attn = nn.ModuleList([
             MaskedCrossMHA(
@@ -495,6 +510,16 @@ class CausalHierarchicalMemoryFusion(nn.Module):
             for _ in range(n_levels)
         ])
 
+        self.norm_current_for_query = nn.ModuleList([
+            LayerNorm(embd_dim)
+            for _ in range(n_levels)
+        ])
+
+        self.norm_query = nn.ModuleList([
+            LayerNorm(self.query_dim)
+            for _ in range(n_levels)
+        ])
+
         self.norm_current_for_same = nn.ModuleList([
             LayerNorm(embd_dim)
             for _ in range(n_levels)
@@ -518,7 +543,7 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         # gate 分支不使用 nn.Conv1d，改用 MaskedConv1D
         self.gate_reduce = nn.ModuleList([
             MaskedConv1D(
-                embd_dim * 3,
+                embd_dim * 4,
                 embd_dim,
                 kernel_size=1,
                 stride=1,
@@ -530,7 +555,7 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         self.gate_out = nn.ModuleList([
             MaskedConv1D(
                 embd_dim,
-                3,
+                4,
                 kernel_size=1,
                 stride=1,
                 padding=0,
@@ -583,14 +608,15 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         gate_input,
         gate_mask,
         scale,
+        has_query,
         has_same,
         has_upper,
     ):
         """
-        用项目里的 MaskedConv1D 计算三路 gate。
+        用项目里的 MaskedConv1D 计算四路 gate。
 
         输出 gate_weight:
-            shape = (B, 3, T)
+            shape = (B, 4, T)
         """
         gate_hidden, _ = self.gate_reduce[scale](
             gate_input,
@@ -603,11 +629,14 @@ class CausalHierarchicalMemoryFusion(nn.Module):
             gate_mask,
         )
 
-        if not has_same:
+        if not has_query:
             gate_logits[:, 1:2, :] = -1e4
 
-        if not has_upper:
+        if not has_same:
             gate_logits[:, 2:3, :] = -1e4
+
+        if not has_upper:
+            gate_logits[:, 3:4, :] = -1e4
 
         gate_weight = F.softmax(gate_logits, dim=1)
 
@@ -617,6 +646,8 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         self,
         current,
         current_mask,
+        text_query=None,
+        text_query_mask=None,
         same_memory=None,
         same_memory_mask=None,
         upper_memory=None,
@@ -642,8 +673,11 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         upper_memory_mask:
             上一层历史 memory mask，shape = (B, 1, T_upper)
         """
+        query_enhanced = torch.zeros_like(current)
         same_enhanced = torch.zeros_like(current)
         upper_enhanced = torch.zeros_like(current)
+
+        has_query = self._has_valid_memory(text_query, text_query_mask)
 
         has_same = (
             self.use_same_memory
@@ -655,9 +689,22 @@ class CausalHierarchicalMemoryFusion(nn.Module):
             and self._has_valid_memory(upper_memory, upper_memory_mask)
         )
 
+        if has_query:
+            query_enhanced = self.query_attn[scale](
+                q_x=self.norm_current_for_query[scale](current),
+                q_mask=current_mask,
+                kv_x=self.norm_query[scale](text_query),
+                kv_mask=text_query_mask,
+            )
+
+        query_conditioned_current = current + query_enhanced
+        query_conditioned_current = query_conditioned_current * current_mask.to(
+            query_conditioned_current.dtype
+        )
+
         if has_same:
             same_enhanced = self.same_attn[scale](
-                q_x=self.norm_current_for_same[scale](current),
+                q_x=self.norm_current_for_same[scale](query_conditioned_current),
                 q_mask=current_mask,
                 kv_x=self.norm_same_memory[scale](same_memory),
                 kv_mask=same_memory_mask,
@@ -665,7 +712,7 @@ class CausalHierarchicalMemoryFusion(nn.Module):
 
         if has_upper:
             upper_enhanced = self.upper_attn[scale](
-                q_x=self.norm_current_for_upper[scale](current),
+                q_x=self.norm_current_for_upper[scale](query_conditioned_current),
                 q_mask=current_mask,
                 kv_x=self.norm_upper_memory[scale](upper_memory),
                 kv_mask=upper_memory_mask,
@@ -674,6 +721,7 @@ class CausalHierarchicalMemoryFusion(nn.Module):
         gate_input = torch.cat(
             [
                 current,
+                query_enhanced,
                 same_enhanced,
                 upper_enhanced,
             ],
@@ -684,16 +732,19 @@ class CausalHierarchicalMemoryFusion(nn.Module):
             gate_input=gate_input,
             gate_mask=current_mask,
             scale=scale,
+            has_query=has_query,
             has_same=has_same,
             has_upper=has_upper,
         )
 
         w_current = gate_weight[:, 0:1, :]
-        w_same = gate_weight[:, 1:2, :]
-        w_upper = gate_weight[:, 2:3, :]
+        w_query = gate_weight[:, 1:2, :]
+        w_same = gate_weight[:, 2:3, :]
+        w_upper = gate_weight[:, 3:4, :]
 
         fused = (
             w_current * current
+            + w_query * query_enhanced
             + w_same * same_enhanced
             + w_upper * upper_enhanced
         )
@@ -721,6 +772,7 @@ class OnlineVideoTransformer(nn.Module):
         embd_dim,
         max_seq_len,
         n_heads,
+        query_dim=None,
         stride=1,
         n_convs=2,
         n_encoder_layers=8,
@@ -743,6 +795,9 @@ class OnlineVideoTransformer(nn.Module):
 
         # 新增参数：是否使用上一层历史 memory
         use_upper_level_memory=True,
+
+        recursive_steps=2,
+        feedback_init_gate=-4.0,
 
         **kargs,
     ):
@@ -812,6 +867,7 @@ class OnlineVideoTransformer(nn.Module):
             )
 
         self.short_window_size = short_window_size
+        self.recursive_steps = max(int(recursive_steps), 1)
 
         self.memory = EventMemory(
             n_scales=n_encoder_layers,
@@ -824,11 +880,35 @@ class OnlineVideoTransformer(nn.Module):
             embd_dim=embd_dim,
             n_levels=n_encoder_layers,
             n_heads=n_heads,
+            query_dim=query_dim,
             attn_pdrop=attn_pdrop,
             proj_pdrop=proj_pdrop,
             init_res_gate=hierarchical_memory_init_gate,
             use_same_memory=use_same_level_memory,
             use_upper_memory=use_upper_level_memory,
+        )
+
+        self.feedback_norm = nn.ModuleList([
+            LayerNorm(embd_dim)
+            for _ in range(n_encoder_layers)
+        ])
+
+        self.feedback_adapter = nn.ModuleList([
+            MaskedConv1D(
+                embd_dim,
+                embd_dim,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            )
+            for _ in range(n_encoder_layers)
+        ])
+
+        self.feedback_gate = nn.Parameter(
+            torch.full(
+                size=(n_encoder_layers,),
+                fill_value=float(feedback_init_gate),
+            )
         )
 
         self.apply(self.__init_weights__)
@@ -945,7 +1025,72 @@ class OnlineVideoTransformer(nn.Module):
                 dim=-1,
             )
 
-    def forward(self, x, mask):
+    def _prepare_text_query(
+        self,
+        text_query,
+        text_query_mask,
+        text_size,
+        bs,
+        nw,
+    ):
+        if text_query is None or text_query_mask is None:
+            return None, None
+
+        if text_query_mask.ndim == 2:
+            text_query_mask = text_query_mask.unsqueeze(1)
+
+        if text_size is not None and text_query.size(0) != bs:
+            text_chunks = []
+            mask_chunks = []
+            offset = 0
+            max_len = 0
+
+            for size in text_size:
+                size = int(size.item() if torch.is_tensor(size) else size)
+                text_chunk = text_query[offset: offset + size]
+                mask_chunk = text_query_mask[offset: offset + size]
+                offset += size
+
+                text_chunk = text_chunk.permute(1, 0, 2).contiguous().view(
+                    text_query.size(1),
+                    -1,
+                )
+                mask_chunk = mask_chunk.permute(1, 0, 2).contiguous().view(
+                    1,
+                    -1,
+                )
+
+                text_chunks.append(text_chunk)
+                mask_chunks.append(mask_chunk)
+                max_len = max(max_len, text_chunk.size(-1))
+
+            padded_text = text_query.new_zeros(bs, text_query.size(1), max_len)
+            padded_mask = text_query_mask.new_zeros(bs, 1, max_len)
+
+            for idx, (text_chunk, mask_chunk) in enumerate(zip(text_chunks, mask_chunks)):
+                padded_text[idx, :, :text_chunk.size(-1)] = text_chunk
+                padded_mask[idx, :, :mask_chunk.size(-1)] = mask_chunk
+
+            text_query = padded_text
+            text_query_mask = padded_mask
+
+        if text_query.size(0) == bs:
+            text_query = text_query.repeat_interleave(nw, dim=0)
+            text_query_mask = text_query_mask.repeat_interleave(nw, dim=0)
+
+        return text_query, text_query_mask
+
+    def _feedback_fuse(self, previous, refined, refined_mask, scale):
+        feedback, _ = self.feedback_adapter[scale](
+            self.feedback_norm[scale](refined),
+            refined_mask,
+        )
+        alpha = torch.sigmoid(self.feedback_gate[scale])
+        out = previous + alpha * feedback
+        out = out * refined_mask.to(out.dtype)
+        return out, refined_mask
+
+    def forward(self, x, mask, text_query=None, text_query_mask=None, text_size=None):
         """
         x:
             shape = (bs, nw, c, vlen)
@@ -975,6 +1120,14 @@ class OnlineVideoTransformer(nn.Module):
             所以不会把当前窗口未来 token 的信息泄露给当前 token。
         """
         bs, nw, _, vlen = x.shape
+
+        text_query, text_query_mask = self._prepare_text_query(
+            text_query=text_query,
+            text_query_mask=text_query_mask,
+            text_size=text_size,
+            bs=bs,
+            nw=nw,
+        )
 
         x = x.view(bs * nw, -1, vlen)
         mask = mask.view(bs * nw, vlen)
@@ -1025,24 +1178,36 @@ class OnlineVideoTransformer(nn.Module):
                         scale + 1
                     )
 
-                # 3. CHMF 融合：
-                # current 和当前层历史 memory 融合；
-                # current 和上一层历史 memory 融合；
-                # 最后三路 gate 融合。
                 if self.use_hierarchical_memory_fusion:
-                    current, current_mask = self.hierarchical_memory_fusion(
-                        current=current,
-                        current_mask=current_mask,
-                        same_memory=same_history,
-                        same_memory_mask=same_history_mask,
-                        upper_memory=upper_history,
-                        upper_memory_mask=upper_history_mask,
-                        scale=scale,
-                    )
+                    base_current = current
+                    refined = current
+                    refined_mask = current_mask
 
-                # 4. 融合完成后，再更新当前层 memory。
-                # 不能先 update 再 fusion，否则当前窗口特征可能提前进入 memory，
-                # 导致当前窗口内部信息回流。
+                    for rf_step in range(self.recursive_steps):
+                        refined, refined_mask = self.hierarchical_memory_fusion(
+                            current=refined,
+                            current_mask=refined_mask,
+                            text_query=text_query,
+                            text_query_mask=text_query_mask,
+                            same_memory=same_history,
+                            same_memory_mask=same_history_mask,
+                            upper_memory=upper_history,
+                            upper_memory_mask=upper_history_mask,
+                            scale=scale,
+                        )
+
+                        if rf_step + 1 < self.recursive_steps:
+                            refined, refined_mask = self._feedback_fuse(
+                                previous=base_current,
+                                refined=refined,
+                                refined_mask=refined_mask,
+                                scale=scale,
+                            )
+
+                    current, current_mask = refined, refined_mask
+
+                # 4. 所有 recursive refinement 完成后，再更新当前层 memory。
+                # RFPN 每轮只读 old memory，避免当前窗口特征提前回流。
                 self.memory.update(
                     scale,
                     current,

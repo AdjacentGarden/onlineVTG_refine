@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from copy import deepcopy
 
 from .fusion import make_fusion
 from .head import make_head
@@ -9,7 +10,10 @@ from .video_net import make_video_net
 class OnVTG(nn.Module):
     def __init__(self, opt):
         super().__init__()
+        opt = deepcopy(opt)
         self.opt = opt
+
+        opt['vid_net'].setdefault('query_dim', opt['text_net']['embd_dim'])
 
         # backbones
         self.text_net = make_text_net(opt['text_net'])
@@ -25,7 +29,7 @@ class OnVTG(nn.Module):
         text, text_masks = self.text_net(tokens, token_masks)
         return text, text_masks
 
-    def encode_video(self, vid, vid_masks):
+    def encode_video(self, vid, vid_masks, text=None, text_masks=None, text_size=None):
         if self.training and vid.size(-1) > self.vid_net.max_seq_len * self.vid_net.stride:
             assert vid.size(1) == 1
             bs, vlen = vid.size(0), self.vid_net.max_seq_len * self.vid_net.stride
@@ -33,13 +37,25 @@ class OnVTG(nn.Module):
             vid = vid.view(bs, -1, nw, vlen).permute(0, 2, 1, 3).contiguous()
             vid_masks = vid_masks.view(bs, nw, vlen)
 
-            fpn, fpn_masks = self.vid_net(vid, vid_masks)
+            fpn, fpn_masks = self.vid_net(
+                vid,
+                vid_masks,
+                text_query=text,
+                text_query_mask=text_masks,
+                text_size=text_size,
+            )
 
             fpn = tuple(p.permute(0, 2, 1, 3).contiguous().view(bs, 1, p.size(2), -1) for p in fpn)
             fpn_masks = tuple(p.view(bs, 1, 1, -1) for p in fpn_masks)
         
         else:
-            fpn, fpn_masks = self.vid_net(vid, vid_masks)
+            fpn, fpn_masks = self.vid_net(
+                vid,
+                vid_masks,
+                text_query=text,
+                text_query_mask=text_masks,
+                text_size=text_size,
+            )
         return fpn, fpn_masks
 
     def fuse_and_predict(self, fpn, fpn_masks, text, text_masks, text_size=None):
@@ -65,15 +81,21 @@ class OnVTG(nn.Module):
         )
 
     def forward(self, vid, vid_masks, text, text_masks, text_size=None):
-        if text.ndim == 4:
+        if text.ndim == 4 and text_size is not None:
             text = torch.cat([t[:k] for t, k in zip(text, text_size)])
-        if text_masks.ndim == 3:
+        if text_masks.ndim == 3 and text_size is not None:
             text_masks = torch.cat(
                 [t[:k] for t, k in zip(text_masks, text_size)]
             )
 
         text, text_masks = self.encode_text(text, text_masks)
-        fpn, fpn_masks = self.encode_video(vid, vid_masks)
+        fpn, fpn_masks = self.encode_video(
+            vid,
+            vid_masks,
+            text=text,
+            text_masks=text_masks,
+            text_size=text_size,
+        )
 
         (
             fpn_logits,

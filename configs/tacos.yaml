@@ -32,6 +32,8 @@ model:
     hierarchical_memory_init_gate: -4.0
     use_same_level_memory: True
     use_upper_level_memory: True
+    recursive_steps: 2
+    feedback_init_gate: -4.0
     
   fusion:
     vid_dim: 256
@@ -71,7 +73,7 @@ train:
     downsample_rate: 4
     crop_ratio: [0.9, 1.0]
 
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
 
   epochs: 12

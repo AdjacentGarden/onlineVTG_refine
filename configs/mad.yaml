@@ -20,6 +20,8 @@ model:
     n_convs: 2
     n_encoder_layers: 8
     memory_size: [2, 2, 16, 24, 12, 4, 2, 2]
+    recursive_steps: 2
+    feedback_init_gate: -4.0
     attn_pdrop: 0.0
     proj_pdrop: 0.1
     path_pdrop: 0.1
